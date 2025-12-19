@@ -25,6 +25,7 @@
 - **`Token Joining`** - Request-based Token Joining
 - **`Token Leaving`** - Token Leaver
 - **`Nickname Changer`** - Nickname Changer
+- **`PFP Changer`** - Changing Tokens PFP's
 - **`Captcha Solving`** - Service-based Captcha Solving
 
 ## GUI Version (35 Stars ⭐)
