@@ -18,7 +18,7 @@
 
 
 ## Screenshot
-![picture](/tokenk-joiner-screenshot.png)
+![picture](/tokenk-joiner-screenshot1.png)
 
 
 ## Features 
@@ -27,9 +27,6 @@
 - **`Nickname Changer`** - Nickname Changer
 - **`PFP Changer`** - Changing Tokens PFP's
 - **`Captcha Solving`** - Service-based Captcha Solving
-
-## GUI Version (35 Stars ⭐)
-![picture](/tokenk-joiner-screenshot1.png)
 
 ## Tech Stack
 - Python
