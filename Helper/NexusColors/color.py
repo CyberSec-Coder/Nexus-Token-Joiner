@@ -119,4 +119,4 @@ class NexusColor:
     RED: str = Color.hex_to_ansi("#ff001e")
     GREEN: str = Color.hex_to_ansi("#44ff00")
     LIGHTBLACK: str = Color.hex_to_ansi("#5c5e5b")
-    LIGHTBLUE: str = Color.hex_to_ansi("#03f8fc")                                                                                                                                                            
+    LIGHTBLUE: str = Color.hex_to_ansi("#03f8fc")   

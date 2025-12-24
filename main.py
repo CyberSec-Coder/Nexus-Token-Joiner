@@ -1,688 +1,329 @@
-"Main File to handle Joining and more."
-
-import ctypes
-import threading
 import time
-import random 
-from typing import Optional
+import json
+import threading
+from queue import Queue
+from typing import List, Dict, Optional
 
-import curl_cffi.requests
-import cloudscraper
+from flask import Flask, render_template, Response
+import requests
+import webview
 
-from Helper import (
-    Discord,
-    Hsolver,
-    Utils,
-    config,
-    fetch_session,
-    intro,
-    pink_gradient,
-    NexusLogging,
-    DetectBypass,
-    OnboardingBypass,
-    BypassRules,
-    RestoreCordBypass,
-    NexusColor,
-    HandleSetup,
-    get_session_id,
-    keep_session_alive
-)
+from Helper.funcs.pfp_adder import PFPController
+from Helper.funcs.server_leaver import LeaverController
+from Helper.funcs.joiner import NexusTokenJoiner, RunTokenJoiner
+from Helper.funcs.vcjoiner import VCController
+from Helper.Utils.handle_startup import HandleSetup
+from Helper.Utils.utils import Discord
 
-class NexusStats:
-    """Used to store stats for joining like: joined, failed, solved, .."""
-    joined: list[str] = []
-    failed: int = 0
-    solved: int = 0
-    start = None
-    thread_running = threading.Event()
-    
-def title():
-    """Function to show NexusStats on title."""
-    while not NexusStats.thread_running.is_set():
-        title = f"Nexus Token Joiner ┃ Joined: {len(NexusStats.joined)} ┃ Failed: {NexusStats.failed} ┃ Solved: {NexusStats.solved} ┃ Time: {round(time.time() - NexusStats.start, 2)}s "
-        ctypes.windll.kernel32.SetConsoleTitleW(title)
-        time.sleep(0.01) 
+app = Flask(__name__)
+log_queue = Queue()
+
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+
+
+class WindowController:
+    def __init__(self):
+        self.logs: List[Dict] = []
+        self.status_window: Optional[webview.Window] = None
+        self.status_updates: Dict[str, int] = {
+            'progress': 0,
+            'current': 0,
+            'total': 0,
+            'successful': 0,
+            'failed': 0,
+            'pending': 0
+        }
+
+        self.vc_controller = VCController()
+        self.leaver_controller: Optional[LeaverController] = None
+
+        self._log_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         
-class NexusTokenJoiner:
-    """Handles Discord token joining and nickname changing."""
-
-    def __init__(
-        self, nickname: str, _proxy: bool, useragent: str, filling: bool = False
-    ) -> None:
-        """
-        Initializes the NexusTokenJoiner instance.
-
-        Args:
-            nickname (str): The nickname to set for the user.
-            _proxy (bool): Whether to use proxies for requests.
-            useragent (str): The User-Agent string for HTTP headers.
-        """
-        self.discord: callable = Discord()
-        self.hsolver: callable = Hsolver()
-        self.utils: callable = Utils()
-        
-        self.filling: bool = filling
-        self.solver: bool = True
-        self._proxy: bool = _proxy
-
-        self.nickname: str = nickname
-        self.useragent: str = useragent
-        
-        self.onboarding = None
-        self.rules = None
-        self.restorecord_detected = False
-        self.client_id = None
-        
-        self.guild_id = None
-        self.session_id: str = None
-
-        self.lock = threading.Lock()
-        self.captcha_retries: set[str] = set()
-        
-    def change_nick(
-        self, guild_id: int, nick: str, token: str
-    ) -> None:
-        """
-        Changes the nickname of a user in a specified Discord guild.
-
-        Args:
-            guild_id (int): The ID of the guild where the nickname is to be changed.
-            nick (str): The new nickname to set.
-            token (str): The Discord token for authentication.
-        """
-        headers = self.discord.fill_headers(
-            token, self.useragent
-        )
-        session = curl_cffi.requests.Session(impersonate="chrome")
-        session.headers.update(headers)
-        session.cookies.update(
-            self.discord.get_cookies(session)
-        )
-        if "{random}" in nick:
-            random_number = random.randint(1111, 9999)
-            nick = nick.replace("{random}", str(random_number))
-
-        response = session.patch(
-            f"https://discord.com/api/v9/guilds/{guild_id}/members/@me",
-            json={"nick": nick},
-            timeout=10
-        )
+        self.useragent = HandleSetup.fetch_user_agent()
 
 
-        if response.status_code == 200:
-            NexusLogging.print_status(
-                token, "Nickname Changed", NexusColor.GREEN
-            )
-        elif response.status_code == 429:
-            NexusLogging.print_status(
-                token, "Ratelimit", NexusColor.RED
-            )
-        else:
-            NexusLogging.print_error(
-                token,
-                "Error while changing Nickname",
-                response,
-            )
 
-    def accept_invite(
-        self, invite: str, token: str, proxy: str = None, session_id: str = None
-    ) -> None:
-        """
-        Accepts a Discord server invite and optionally changes the user's nickname.
+    def log(self, message: str, log_type: str = "info"):
+        """Add a message to the logs."""
+        with self._log_lock:
+            self.logs.append({"message": message, "type": log_type})
 
-        Args:
-            invite (str): The server invite code.
-            token (str): The Discord token for authentication.
-            proxy (str, optional): Proxy to use for the request. Defaults to None.
-        """
-        session = curl_cffi.requests.Session(impersonate="chrome")
+    def get_logs(self) -> List[Dict]:
+        """Get and clear logs."""
+        with self._log_lock:
+            logs_copy = self.logs.copy()
+            self.logs.clear()
+        return logs_copy
+
+
+
+    def update_status(self, **kwargs):
+        """Update status metrics."""
+        with self._status_lock:
+            for key, value in kwargs.items():
+                if key in self.status_updates:
+                    self.status_updates[key] = value
+
+    def get_status_updates(self) -> Dict[str, int]:
+        """Return current status metrics."""
+        with self._status_lock:
+            return self.status_updates.copy()
+
+
+
+    def update_config_json(self, settings: dict) -> dict:
+        """Save settings to config.json"""
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+        return {"success": True}
+
+    def load_config_json(self) -> dict:
+        """Load config.json and return its contents."""
         try:
-            if not session_id:
-                session_id = fetch_session(token)
-                if session_id == "Invalid token":
-                    NexusLogging.print_status(
-                        token, "Invalid", NexusColor.RED
-                    )
-                    return
-
-                if session_id == "429":
-                    NexusLogging.print_status(
-                        token,
-                        "Cant Fetch Session -> 429",
-                        NexusColor.RED,
-                    )
-                    return
-
-            self.session_id = session_id
-            payload = {"session_id": self.session_id}
-            session.cookies.update(
-                self.discord.get_cookies(session)
-            )
-
-            if self._proxy:
-                session.proxies = {
-                "http": f"http://{proxy}",
-                "https": f"http://{proxy}"
-                }
-
-            response = session.post(
-                f"https://discord.com/api/v9/invites/{invite}",
-                json=payload,
-                headers=self.discord.fill_headers(
-                    token, self.useragent
-                ),
-                timeout=config["join"]["timeout"]
-            )
-
-            if response.status_code == 200:
-                self._handle_successful_invite(
-                    token, response, self.nickname, proxy, invite
-                )
-                return
-            
-            elif response.status_code == 429:
-                NexusLogging.print_status(
-                    token, "Ratelimit", NexusColor.RED
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-            elif (
-                response.status_code == 401
-                and response.json()["message"]
-                == "401: Unauthorized"
-            ):
-                NexusLogging.print_status(
-                    token, "Invalid", NexusColor.RED
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-            elif (
-                "You need to verify your account"
-                in response.text
-            ):
-                NexusLogging.print_status(
-                    token, "Locked", NexusColor.RED
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-            elif "captcha_rqdata" in response.text:
-                self._handle_captcha(
-                    token,
-                    response,
-                    invite,
-                    session,
-                    proxy,
-                )
-            else:
-                NexusLogging.print_error(
-                    token, "Error while joining", response
-                )
-                
-        except TimeoutError:
-            NexusLogging.print_status(token, "Timeout", NexusColor.RED)
-            with self.lock:
-                NexusStats.failed += 1
-        except KeyError as e:
-            NexusLogging.print_status(token, f"Key Error: {e}", NexusColor.RED)
-            with self.lock:
-                NexusStats.failed += 1
+            with open("config.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print("Error: config.json is not valid JSON")
+            return {}
         except Exception as e:
-            error_message = str(e)
-            if "curl: (28) Connection timed out" not in error_message:
-                NexusLogging.print_status(token, f"Error While Trying to join: {error_message}", NexusColor.RED)
-                with self.lock:
-                    NexusStats.failed += 1
+            print(f"Error loading config.json: {e}")
+            return {}
 
-    def _handle_successful_invite(
-        self, token, response, nickname, proxy, invite = None
-    ):
-        """
-        Handles the logic for a successful server join.
 
-        Args:
-            token (str): The Discord token used for the request.
-            response (requests.Response): The response object from the server.
-            nickname (str): The nickname to set, if any.
+    def prepare_headers(self) -> dict:
         """
-        with self.lock:
-            NexusStats.joined.append(token)
-            
-        if self.filling and invite:
-            NexusLogging.print_status(
-                token, f"Joined {NexusColor.LIGHTBLACK}- ({invite})", NexusColor.GREEN
-            )
+        Prepares headers for future uses.
+        Exposed to JS.
+        """
+        try:
+            HandleSetup.setup_headers(
+                discord=Discord(), 
+                user_agent=self.useragent
+                )
+            return {"success": True, "message": "Headers built successfully", "headers": self.discord_headers}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def check_internet_connection(self) -> dict:
+        """Check if the internet connection is working by pinging a URL."""
+        try:
+            r = requests.get("https://nexustools.store/", timeout=5)  
+            if r.ok:
+                return {"success": True, "message": "Internet connection is working."}
+            else:
+                return {"success": False, "message": f"Received status code {r.status_code}"}
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "message": f"Internet check failed: {e}"}
         
-        else:
-            NexusLogging.print_status(
-                token, "Joined", NexusColor.GREEN
+    def create_status_window(self) -> bool:
+        """Create the status window."""
+        if not self.status_window or not self.status_window.exists():
+            self.status_window = webview.create_window(
+                title="Operation Status",
+                url="/status",
+                width=800,
+                height=600,
+                frameless=True,
+                on_top=True
             )
-            
-        
-        self.guild_id = response.json()["guild"]["id"]
+            return True
+        return False
 
-        cfsess = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "desktop": True,
-                "mobile": False,
-            }
-        )
-        bypasses = config["join"]
-        detect = DetectBypass(token=token, guildid=self.guild_id, useragent=self.useragent , proxy=proxy, cfsession=cfsess)
-            
-        self.onboarding = self.onboarding if self.onboarding is not None else detect.check_onboarding()
-        self.rules = self.rules if self.rules is not None else detect.check_rules()
-        
-        if self.rules and bypasses["bypass_rules"]:
-            NexusLogging.print_status(
-                token=token,
-                message="Detected Rules",
-                color=NexusColor.LIGHTBLUE,
+    def close(self):
+        """Close all windows."""
+        for window in webview.windows:
+            window.destroy()
+
+    def minimize(self):
+        """Minimize all windows."""
+        for window in webview.windows:
+            window.minimize()
+
+
+
+    def join_server(self, token: str, invite_code: str, nickname: str, proxy: Optional[str], filling: dict) -> dict:
+        """Join a Discord server using a token."""
+        try:
+            joiner = NexusTokenJoiner(
+                nickname=nickname,
+                _proxy=proxy,
+                useragent=self.useragent,
+                filling=filling
             )
-            BypassRules(
-                token=token, guild_id=self.guild_id, useragent=self.useragent, proxy=proxy
-            ).bypass_rules()
-            
-        if self.onboarding and bypasses["bypass_onboarding"]:
-            NexusLogging.print_status(
-                token=token,
-                message="Detected Onboarding",
-                color=NexusColor.LIGHTBLUE,
-            )
-            OnboardingBypass(
-                token=token, guildid=self.guild_id, useragent=self.useragent, proxy=proxy
-            ).bypass_onboarding()
-        
-        if proxy and bypasses["bypass_restorecord"]:
-            if not self.restorecord_detected:
-                client_id = detect.check_restorecord()
-                if client_id:
-                    self.restorecord_detected = True
-                    self.client_id = client_id
-                else:
-                    self.restorecord_detected = True  
+            status, response = joiner.accept_invite(invite=invite_code, token=token, proxy=proxy)
+            if status:
+                return {"success": True, "message": response}
+            return {"success": False, "error": response}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
-            if self.client_id:
-                NexusLogging.print_status(
-                    token=token,
-                    message="Detected Restorecord",
-                    color=NexusColor.LIGHTBLUE,
-                )
-                RestoreCordBypass(
-                    token=token,
-                    guild_id=self.guild_id,
-                    client_id=self.client_id,
-                    useragent=self.useragent,
-                    proxy=proxy,
-                    cfsession=cfsess
-                ).bypass()
-                
-        if nickname:
-            self.change_nick(
-                guild_id=self.guild_id,
-                nick=nickname,
-                token=token
-            )
-
-                    
-            
-
-    def _handle_captcha(
-        self, token, response, invite, session, proxy_
-    ):
-        """
-        Handles captcha challenges during the server joining process.
-
-        Args:
-            token (str): The Discord token used for the request.
-            response (requests.Response): The response object from the server.
-            invite (str): The server invite code.
-            session (tls_client.Session): The current TLS session.
-            proxy_ (str): Proxy used for the request.
-        """
-        NexusLogging.print_status(
-            token=token,
-            message="Hcaptcha",
-            color=NexusColor.RED
-        )
-        if (
-            config["captcha"]["api_key"]
-            != "YOUR-24CAP-KEY | 24captcha.online" 
-            and
-            config["captcha"]["enabled"]
-            and
-            proxy_
-        ):
-            self._solve_captcha(
-                token,
-                response,
-                invite,
-                session,
-                proxy_,
-            )
-        else:
-            with self.lock:
-                NexusStats.failed += 1
-
-    def _solve_captcha(
-        self, token, response, invite, session, proxy_
-    ):
-        """
-        Attempts to solve a captcha challenge using an external service.
-
-        Args:
-            token (str): The Discord token used for the request.
-            response (requests.Response): The response object from the server.
-            invite (str): The server invite code.
-            session (tls_client.Session): The current TLS session.
-            proxy_ (str): Proxy used for the request.
-        """
-        if self.filling:
-            if invite not in self.captcha_retries:
-                self.captcha_retries.add(invite)
-                NexusLogging.print_status(
-                    token=token,
-                    message=f"Captcha detected, deferring invite '{invite}' for retry",
-                    color=NexusColor.YELLOW
-                )
-                Utils.append_invite_to_retry(invite)
-                return 
-            
-        if self.solver:
-            NexusLogging.print_status(
-                token=token[:45],
-                message="Solving Captcha..",
-                color=NexusColor.GREEN
-            )
-            site_key = response.json()["captcha_sitekey"]
-            rqdata = response.json()["captcha_rqdata"]
-            rqtoken = response.json()["captcha_rqtoken"]
-            captcha_session_id = response.json()["captcha_session_id"]
-
-            try:
-                start_time = time.time()
-                status, solution = self.hsolver.get_captcha_key(
-                    rqdata=rqdata,
-                    site_key=site_key,
-                    website_url="https://discord.com/channels/@me",
-                    proxy=proxy_,
-                    api_key=config["captcha"]["api_key"],
-                )
-                if status:
-                    end_time = time.time()
-                    NexusStats.solved += 1
-                    NexusLogging.print_status(
-                        token=solution,
-                        message=f"{NexusColor.GREEN}Solved in {NexusColor.RESET}{end_time - start_time:.2f}s",
-                        color=NexusColor.GREEN,
-                        length=60
-                    )
-                    headers = self.discord.fill_headers(
-                        token=token, 
-                        user_agent=self.useragent,
-                        xcaptcha=solution,
-                        rqtoken=rqtoken,
-                        session_id=captcha_session_id
-                    )
-                   
-                    response = session.post(
-                        f"https://discord.com/api/v9/invites/{invite}",
-                        json={
-                            "session_id": self.session_id
-                        },
-                        headers=headers,
-                        timeout=config["join"]["timeout"]
-                    )
-                    
-
-                    if response.status_code == 200:
-                        with self.lock:
-                            NexusStats.joined.append(token)
-                        
-                        if not self.filling:
-                            NexusLogging.print_status(
-                                token,
-                                "Joined",
-                                NexusColor.GREEN,
-                            )
-                        else:
-                            NexusLogging.print_status(
-                                token,
-                                f"Joined {NexusColor.LIGHTBLACK}- ({invite})",
-                                NexusColor.GREEN,
-                            )
-                        if self.nickname:
-                            guild_id = response.json()[
-                                "guild"
-                            ]["id"]
-                            self.change_nick(
-                                guild_id,
-                                self.nickname,
-                                token,
-                            )
-                    else:
-                        NexusLogging.print_error(
-                            token,
-                            "Error while joining",
-                            response,
-                        )
-                        with self.lock:
-                            NexusStats.failed += 1
-                else:
-                    NexusLogging.print_status(
-                        "Failed To Solve Captcha.",
-                        solution,
-                        NexusColor.RED
-                    )
-                    with self.lock:
-                        NexusStats.failed += 1
-                    return
-            except (
-                ConnectionError,
-                TimeoutError,
-            ) as conn_error:
-                print(
-                    f"Connection error occurred: {conn_error}"
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-            except ValueError as val_error:
-                print(
-                    f"Value error in response: {val_error}"
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-            except KeyError as key_error:
-                print(
-                    f"Key error when accessing response data: {key_error}"
-                )
-                with self.lock:
-                    NexusStats.failed += 1
-        else:
-            with self.lock:
-                NexusStats.failed += 1
-                
-class RunTokenJoiner:
-    @staticmethod
-    def run_joiner(
-        utils: Utils,
-        invite: str,
-        nickname: Optional[str],
-        proxy_mode: Optional[str],
-        useragent: str,
-        delay_min: Optional[int],
-        delay_max: Optional[int],
-    ) -> None:
-        """Run the token joiner with the given configuration."""
-        threads = []
-        use_proxies = bool(proxy_mode)
-        proxy = None
-
-        nexus = NexusTokenJoiner(nickname=nickname, _proxy=use_proxies, useragent=useragent)
-        NexusStats.start = time.time()
-        threading.Thread(target=title, daemon=True).start()
-
-        for token in utils.get_tokens(formatting=True):
-            if use_proxies:
-                proxy = utils.get_formatted_proxy("Input/proxies.txt")
-
-            thread = threading.Thread(target=nexus.accept_invite, args=(invite, token, proxy))
-            threads.append(thread)
-            thread.start()
-
-            if config["delay"]["enabled"]:
-                time.sleep(random.uniform(delay_min, delay_max))
-
-        for thread in threads:
-            thread.join()
-
-        NexusStats.thread_running.set()
-        RunTokenJoiner.save_results(invite)
-
-        RunTokenJoiner.print_summary()
-
-    @staticmethod
     def run_token_filling(
-        invite_list: list[str],
+        self,
+        invite_list: List[str],
+        tokens_list: List[str],
+        proxy_list: List[str],
         nickname: str,
-        proxy_mode: Optional[str],
-        useragent: str,
+        proxy_mode: str,
         delay_min: int,
         delay_max: int
-    ) -> None:
-        """Fill multiple invites using tokens."""
-        threads = []
-        tokens = Utils.get_tokens(formatting=True)
-
-        if proxy_mode == "per-token":
-            token_proxy_map = {
-                token: Utils.get_formatted_proxy("Input/proxies.txt") for token in tokens
-            }
-        else:
-            token_proxy_map = {}
-
-        NexusStats.start = time.time()
-        threading.Thread(target=title, daemon=True).start()
-
-        for token in tokens:
-            proxy = token_proxy_map.get(token) if proxy_mode == "per-token" else None
-
-            thread = threading.Thread(
-                target=RunTokenJoiner.handle_token_invites,
-                args=(token, invite_list, nickname, proxy_mode, proxy, useragent, delay_min, delay_max),
-                daemon=True
+    ) -> dict:
+        """Start token filling for multiple tokens."""
+        try:
+            RunTokenJoiner.run_token_filling(
+                invite_list=invite_list,
+                tokens_list=tokens_list,
+                proxy_list=proxy_list,
+                nickname=nickname,
+                proxy_mode=proxy_mode,
+                useragent=self.useragent,
+                delay_min=delay_min,
+                delay_max=delay_max
             )
-            threads.append(thread)
-            thread.start()
+            return {"success": True, "message": "Token filling completed"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
-        for thread in threads:
-            thread.join()
 
-        NexusStats.thread_running.set()
-        RunTokenJoiner.print_summary()
 
-    @staticmethod
-    def handle_token_invites(
-        token: str,
-        invite_list: list[str],
-        nickname: str,
-        proxy_mode: Optional[str],
-        static_proxy: Optional[str],
-        useragent: str,
+    def leaver_start(
+        self,
+        tokens: List[str],
+        leave_all: bool,
+        server_id: Optional[str],
+        delay_enabled: bool,
         delay_min: int,
-        delay_max: int
-    ) -> None:
-        """Handle multiple invite joins for a single token."""
-        session_id, ws, interval = get_session_id(token)
-        if ws:
-            print(f"{NexusColor.GREEN}Connected. Session ID: {session_id}")
-            keep_session_alive(ws, interval)
-
-        while invite_list:  
+        delay_max: int,
+        max_workers: int = 20,
+        proxies: Optional[List[str]] = None
+    ) -> dict:
+        """Start server leaving process."""
+        if not leave_all:
             try:
-                invite = invite_list.pop(0)  
-            except IndexError:
+                server_id = int(server_id)
+            except Exception:
+                return {"success": False, "error": "Invalid server ID"}
+
+        if self.leaver_controller and self.leaver_controller._running:
+            return {"success": False, "error": "Leaver already running"}
+
+        proxy_list = proxies if isinstance(proxies, list) else ([proxies] if proxies else [])
+
+        self.leaver_controller = LeaverController(
+            useragent=self.useragent,
+            proxy=proxy_list
+        )
+
+        return self.leaver_controller.start(
+            tokens,
+            bool(leave_all),
+            server_id,
+            bool(delay_enabled),
+            int(delay_min),
+            int(delay_max),
+            int(max_workers),
+        )
+
+    def leaver_stop(self) -> dict:
+        """Stop the leaver if running."""
+        if not self.leaver_controller:
+            return {"success": False, "error": "No leaver running"}
+        return self.leaver_controller.stop()
+
+
+
+    def update_pfp_multi(
+        self,
+        tokens: List[str],
+        images: List[str],
+        delay_enabled: bool,
+        delay_min: int,
+        delay_max: int,
+        proxies: Optional[List[str]] = None
+    ) -> dict:
+        """Update multiple PFPs."""
+        return PFPController().update_pfp_multi(tokens, images, delay_enabled, delay_min, delay_max, proxies=proxies)
+
+    def stop_pfp(self) -> dict:
+        """Stop PFP updating."""
+        PFPController().stop()
+        return {"success": True, "message": "PFP update stopped"}
+
+
+
+    def leave_vc(self, token: str, guild_id: str, channel_id: str) -> dict:
+        try:
+            return self.vc_controller.leave_vc(token, int(guild_id), int(channel_id))
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def leave_vc_multi(self, tokens: List[str], guild_id: str, channel_id: str) -> dict:
+        try:
+            return self.vc_controller.leave_vc_multi(tokens, int(guild_id), int(channel_id))
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def join_vc_multi(self, tokens: List[str], guild_id: str, channel_id: str, options: Optional[dict] = None) -> dict:
+        try:
+            self.vc_controller.join_vc_multi(tokens, int(guild_id), int(channel_id), options or {})
+            return {"success": True, "message": "Joining VC(s) started"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/status')
+def status():
+    return render_template('index.html')
+
+
+@app.route('/events')
+def events():
+    """Server-Sent Events endpoint for live updates"""
+    def event_stream():
+        controller = webview.windows[0]._js_api
+        last_status = {}
+
+        while True:
+            try:
+                for log in controller.get_logs():
+                    yield f"data: {json.dumps(log)}\n\n"
+
+                current_status = controller.get_status_updates()
+                if current_status != last_status:
+                    yield f"data: {json.dumps(current_status)}\n\n"
+                    last_status = current_status
+
+                time.sleep(0.1)
+            except Exception:
                 break
 
-            proxy = (
-                Utils.get_formatted_proxy("Input/proxies.txt")
-                if proxy_mode == "rotating"
-                else static_proxy
-            )
+    return Response(event_stream(), mimetype="text/event-stream")
 
-            nexus = NexusTokenJoiner(nickname=nickname, _proxy=proxy, useragent=useragent, filling=True)
-            nexus.accept_invite(invite, token, proxy, session_id)
 
-            if config["delay"]["enabled"]:
-                time.sleep(random.uniform(delay_min, delay_max))
+def run_flask():
+    app.run(debug=False, port=5000, use_reloader=False)
 
-    @staticmethod
-    def save_results(invite: str) -> None:
-        """Save successfully joined tokens to a file."""
-        with open(f"Output/joined_{invite}.txt", "w", encoding="utf-8") as f:
-            for token in NexusStats.joined:
-                f.write(token + "\n")
 
-    @staticmethod
-    def print_summary() -> None:
-        """Print a summary of the join operation."""
-        print(
-            f"{NexusLogging.LC} {NexusColor.LIGHTBLACK}Joined: {NexusColor.GREEN}{len(NexusStats.joined)}"
-            f"{NexusColor.LIGHTBLACK} | Failed: {NexusColor.RED}{NexusStats.failed}"
-            f"{NexusColor.LIGHTBLACK} | Total: {pink_gradient[2]}{len(NexusStats.joined) + NexusStats.failed}{NexusColor.RESET}"
+if __name__ == '__main__':
+    controller = WindowController()
+
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+
+    main_window = webview.create_window(
+        title="Nexus Joiner",
+        url="http://127.0.0.1:5000",
+        js_api=controller,
+        width=1000,
+        height=600,
+        frameless=True
         )
-        input()
 
-def main() -> None:
-    """Main function to run the token joiner."""
-    utils = Utils()
-    discord = Discord()
-    xcontext = None
-
-    utils.clear()
-    HandleSetup.show_initial_title()
-
-    useragent = HandleSetup.fetch_user_agent()
-    intro()
-
-    Utils.new_title("Token Joiner discord.gg/nexus-tools ┃ 2.3.0")
-    proxy_mode = HandleSetup.handle_proxies(utils)
-
-    if config["join"]["token_filling"]:
-        invite_list = HandleSetup.get_invite_links()
-
-        HandleSetup.setup_headers(discord=discord, user_agent=useragent)
-        nickname = HandleSetup.get_nickname()
-        delay_min, delay_max = HandleSetup.get_delay()
-
-        RunTokenJoiner.run_token_filling(
-            invite_list, nickname, proxy_mode, useragent, delay_min, delay_max
-        )
-        return
-
-    invite = HandleSetup.get_invite_link()
-    HandleSetup.validate_invite(invite)
-
-    location, guild_id, channel_id, type_ = utils.get_xcontext_values(
-        invite=invite,
-        token=utils.get_random_token(),
-        proxie=proxy_mode
-    )
-
-    if guild_id:
-        xcontext = (location, guild_id, channel_id, type_)
-
-    HandleSetup.setup_headers(discord=discord, user_agent=useragent, xcontext=xcontext)
-
-    nickname = HandleSetup.get_nickname()
-    delay_min, delay_max = HandleSetup.get_delay()
-
-    RunTokenJoiner.run_joiner(
-        utils, invite, nickname, proxy_mode, useragent, delay_min, delay_max
-    )
-
-if __name__ == "__main__":
-    main()
-
-
+    webview.start(debug=False, icon="./static/logo.png")

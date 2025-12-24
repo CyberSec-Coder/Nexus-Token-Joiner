@@ -1,7 +1,8 @@
 """Startup Files which stores A HandleSetup Class."""
 
-from typing import Optional, Tuple, Union
+from typing import Optional
 
+import datetime
 import time
 import sys
 import os
@@ -20,6 +21,7 @@ class HandleSetup:
     def fetch_user_agent() -> str:
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
+
     @staticmethod
     def show_initial_title():
         """Display the initial title with an option to skip the animation."""
@@ -30,13 +32,15 @@ class HandleSetup:
     @staticmethod
     def setup_headers(discord, user_agent: str, xcontext: tuple = None):
         """Set up headers for the Discord instance."""
-        print(
-            f"{NexusLogging.LC} {NexusColor.LIGHTBLACK}Building Headers...{NexusColor.RESET}"
-        )
+        now = datetime.datetime.now().strftime("%d/%b/%Y %H:%M:%S")
+
+        print(f"127.0.0.1 - - [{now}] \"BUILD /headers HTTP/1.1\" 100 -")
+
         discord.fill_headers(token="", user_agent=user_agent, xcontext=xcontext)
-        print(
-            f"{NexusLogging.LC} {NexusColor.GREEN}Headers Built!{NexusColor.RESET}"
-        )
+
+        # Log the success
+        now = datetime.datetime.now().strftime("%d/%b/%Y %H:%M:%S")
+        print(f"127.0.0.1 - - [{now}] \"BUILD /headers HTTP/1.1\" 200 -")
 
     @staticmethod
     def handle_proxies(

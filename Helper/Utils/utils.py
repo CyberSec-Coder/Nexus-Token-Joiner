@@ -519,12 +519,12 @@ class Hsolver:
                     'rqdata': rqdata
                 }
             }
-            r = requests.post("https://api.razorcap.live/create_task", json=json)
+            r = requests.post("https://api.razorcap.me/create_task", json=json)
             if r.ok:
                 task_id = r.json()["task_id"]
 
             for _ in range(45):
-                r = requests.get(f"https://api.razorcap.live/get_result/{task_id}")
+                r = requests.get(f"https://api.razorcap.me/get_result/{task_id}")
                 if r.json()["status"] == "solved":
                     return True, r.json()["response_key"]
                 
